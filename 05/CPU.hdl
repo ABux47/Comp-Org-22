@@ -1,0 +1,151 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/05/CPU.hdl
+
+/**
+ * The Hack CPU (Central Processing unit), consisting of an ALU,
+ * two registers named A and D, and a program counter named PC.
+ * The CPU is designed to fetch and execute instructions written in 
+ * the Hack machine language. In particular, functions as follows:
+ * Executes the inputted instruction according to the Hack machine 
+ * language specification. The D and A in the language specification
+ * refer to CPU-resident registers, while M refers to the external
+ * memory location addressed by A, i.e. to Memory[A]. The inM input 
+ * holds the value of this location. If the current instruction needs 
+ * to write a value to M, the value is placed in outM, the address 
+ * of the target location is placed in the addressM output, and the 
+ * writeM control bit is asserted. (When writeM==0, any value may 
+ * appear in outM). The outM and writeM outputs are combinational: 
+ * they are affected instantaneously by the execution of the current 
+ * instruction. The addressM and pc outputs are clocked: although they 
+ * are affected by the execution of the current instruction, they commit 
+ * to their new values only in the next time step. If reset==1 then the 
+ * CPU jumps to address 0 (i.e. pc is set to 0 in next time step) rather 
+ * than to the address resulting from executing the current instruction. 
+ */
+
+CHIP CPU {
+
+    IN  inM[16],         // M value input  (M = contents of RAM[A])
+        instruction[16], // Instruction for execution
+        reset;           // Signals whether to re-start the current
+                         // program (reset==1) or continue executing
+                         // the current program (reset==0).
+
+    OUT outM[16],        // M value output
+        writeM,          // Write to M? 
+        addressM[15],    // Address in data memory (of M)
+        pc[15];          // address of next instruction
+
+    PARTS:
+     
+
+
+  /*
+    instruction bits:
+        instruction[15] == Op-code bit (determines A or C instruction)
+        instruction[14] == Unused bit during C instructions 
+        instruction[13] == Unused bit during C instructions 
+        instruction[12] == A bit (determines if M register is used during ALU operation)
+        instruction[11] == ALU zx bit (c1 bit) 
+        instruction[10] == ALU nx bit (c2 bit) 
+        instruction[9] == ALU zy bit (c3 bit) 
+        instruction[8] == ALU ny bit (c4 bit) 
+        instruction[7] == ALU f bit (c5 bit) 
+        instruction[6] == ALU no bit (c6 bit) 
+        instruction[5] == A registyer bit (d1 bit)
+        instruction[4] == D registyer bit (d2 bit)
+        instruction[3] == M registyer bit (d3 bit)
+        instruction[2] == LT bit (j1 bit) 
+        instruction[1] == EQ bit (j2 bit)
+        instruction[0] == GT bit (j3 bit)
+    */
+
+    //=================================================================================================
+    // A-Register
+    /*
+        Use the Op-Code to choose between a constant (A-Instruction)
+        and the ALU's output (C-Instruction) for the input to the 
+        A-Register
+    */
+    Mux16(a=instruction,b=outALU,sel=instruction[15],out=inA);
+    
+    // Not the Op-Code to determine if an A-Instruction is being processed
+    Not(in=instruction[15],out=isA);
+
+    /*
+        When !instruction[15] == 1, it is @value which means A should load a value
+        When instruction[5] == 1, it is A=outALU which means A should load a value
+    */
+    Or(a=isA,b=instruction[5],out=loadA);
+    /*
+        Loads a new input to the A-Register if above code dictates it to
+        Outputs both to A-Register and sets the memory address
+    */
+    ARegister(in=inA,load=loadA,out=outA,out[0..14]=addressM);
+
+    //=================================================================================================
+    // D-Register
+    // When instruction[4] == 1, it is D=outALU which means D should load a value
+    And(a=instruction[15],b=instruction[4],out=loadD);
+    /*
+        Loads a new input to the D-Register if above code dictates it to
+        Set the ALU x-input to D
+    */
+    DRegister(in=outALU,load=loadD,out=outD);
+
+    //=================================================================================================
+    // M-Register
+    // When instruction[3] == 1, it is M=outALU which means M should load a value
+    And(a=instruction[15],b=instruction[3],out=writeM);
+
+    //=================================================================================================
+    // ALU
+    // Set the ALU y-input to either A or M (RAM[A])
+    Mux16(a=outA,b=inM,sel=instruction[12],out=outAM);
+
+    // Set the ALU appropriately
+    ALU(x=outD,y=outAM,                         // Set the ALU inputs
+        zx=instruction[11],nx=instruction[10],  // Set the X Pins
+        zy=instruction[9],ny=instruction[8],    // Set the Y Pins
+        f=instruction[7],no=instruction[6],     // Set the Function Pins
+        out=outM,out=outALU,                    // Set the ALU Outputs
+        zr=zero,ng=neg);                        // Set the Output Flags 
+
+    //=================================================================================================
+    // Jump
+    // zero | neg ALU flags to determine if neither is true
+    Or(a=zero,b=neg,out=notPos);
+    // Negate the result to determine if positive is true
+    Not(in=notPos,out=pos);
+
+    And(a=instruction[0],b=pos,out=jgt);     // outALU > 0
+    And(a=instruction[1],b=zero,out=jeq);    // outALU == 0 
+    And(a=instruction[2],b=neg,out=jlt);     // outALU < 0
+
+    // Combine the first 2 jump bits
+    Or(a=jgt,b=jeq,out=j12);
+    // Combine the prior jump bits and 3rd jump bit
+    Or(a=j12,b=jlt,out=j123);
+
+    // When j123 == 1, the jump condition is met
+    And(a=j123,b=instruction[15],out=jump);
+
+    //=================================================================================================
+    // PC Register
+    /*
+        Takes in the A-Register, jump result, reset input, and increment (always true)
+        to determine where the next address in ROM32K should be
+
+        if (jump == 1)
+            pc = outA (we jump to ROM[A])
+        else if (reset == 1)
+            pc = 0 (we jump to ROM[0])
+        else
+            pc = pc + 1 (we increment to our next address)
+    */
+    PC(in=outA,load=jump,reset=reset,inc=true,out[0..14]=pc);
+    
+    //=================================================================================================
+}
